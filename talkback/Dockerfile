@@ -1,4 +1,4 @@
-FROM ghcr.io/home-assistant/amd64-base-python:3.13
+FROM python:3.12-alpine
 
 RUN apk add --no-cache ffmpeg curl bash
 
