@@ -1,14 +1,15 @@
-ARG BUILD_FROM
-FROM $BUILD_FROM
+FROM ghcr.io/home-assistant/amd64-base-python:3.12
 
-RUN apk add --no-cache python3 py3-pip ffmpeg curl && \
-    pip3 install --no-cache-dir --break-system-packages \
-        uiprotect==10.3.1 \
-        fastapi==0.115.6 \
-        "uvicorn[standard]==0.32.0" \
-        python-multipart==0.0.20
+RUN apk add --no-cache ffmpeg curl bash
 
 WORKDIR /app
+
+RUN pip3 install --no-cache-dir \
+    uiprotect==10.3.1 \
+    fastapi==0.115.6 \
+    "uvicorn[standard]==0.32.0" \
+    python-multipart==0.0.20
+
 COPY talkback_server.py talk.html run.sh ./
 RUN chmod +x run.sh && mkdir -p /tmp/talkback-chunks
 

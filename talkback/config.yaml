@@ -28,4 +28,4 @@ schema:
   ufp_api_key: str
   ufp_ssl_verify: bool
   ufp_camera_id: str
-  log_level: "info|debug|warning"
+  log_level: list(info|debug|warning)
