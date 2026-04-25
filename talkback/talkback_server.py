@@ -3,7 +3,7 @@ Talkback Server — HA Add-on version
 Suporta ingress do Home Assistant.
 """
 from __future__ import annotations
-import asyncio, logging, os, time, uuid
+import asyncio, json, logging, os, time, uuid
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -12,6 +12,16 @@ from uiprotect import ProtectApiClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("talkback")
+
+# Ler opcoes do HA add-on
+try:
+    with open("/data/options.json") as _f:
+        _opts = json.load(_f)
+    for _k, _v in _opts.items():
+        os.environ[_k.upper()] = str(_v)
+    log.info("Opcoes carregadas: %s", list(_opts.keys()))
+except Exception as _e:
+    log.warning("options.json nao encontrado: %s", _e)
 
 HOST       = os.environ.get("UFP_ADDRESS", "10.20.30.100")
 PORT       = int(os.environ.get("UFP_PORT", "443"))
@@ -69,6 +79,7 @@ async def _wake_speaker() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     log.info("Modo: %s", "MOCK" if MOCK else "PRODUCAO")
+    log.info("USER=%s API_KEY=%s CAMERA_ID=%s", USER, API_KEY[:8]+"..." if API_KEY else "", CAMERA_ID)
     if not MOCK and all([USER, PASS, API_KEY, CAMERA_ID]):
         try:
             await _ensure_connected()
