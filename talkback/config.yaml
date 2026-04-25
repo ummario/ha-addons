@@ -1,0 +1,31 @@
+name: "Talkback Campainha"
+version: "1.0.0"
+slug: "talkback"
+description: "Push-to-talk para UniFi Protect G6 Pro Entry"
+url: "https://github.com/ummario/ha-addons"
+arch:
+  - aarch64
+  - amd64
+init: false
+ingress: true
+ingress_port: 3006
+panel_icon: "mdi:microphone"
+panel_title: "Campainha"
+options:
+  ufp_address: "10.20.30.100"
+  ufp_port: 443
+  ufp_username: ""
+  ufp_password: ""
+  ufp_api_key: ""
+  ufp_ssl_verify: false
+  ufp_camera_id: "69d9995000b48203e459e1a4"
+  log_level: "info"
+schema:
+  ufp_address: str
+  ufp_port: int
+  ufp_username: str
+  ufp_password: str
+  ufp_api_key: str
+  ufp_ssl_verify: bool
+  ufp_camera_id: str
+  log_level: "info|debug|warning"
