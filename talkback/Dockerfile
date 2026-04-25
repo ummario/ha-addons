@@ -9,4 +9,4 @@ RUN apk add --no-cache python3 py3-pip ffmpeg curl && \
 
 WORKDIR /app
 COPY talkback_server.py talk.html ./
-CMD ["python3", "/app/talkback_server.py"]
+CMD ["python3", "app/talkback_server.py"]
