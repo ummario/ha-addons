@@ -1,13 +1,10 @@
 """
-Talkback Server v2.0.1 — WebSocket + FIFO streaming com pre-buffer.
+Talkback Server v2.0.2 — WebSocket + FIFO streaming com pre-buffer 200ms.
 
-Mudanças relativamente a v2.0.0:
-  - Pre-buffering de 500ms antes de iniciar TalkbackStream (resolve probe
-    do PyAV em FIFO sem dados suficientes)
-  - Reorganização da ordem de operações: ready → recolher prebuffer →
-    create_talkback_stream → start → abrir writer → flush prebuffer
-  - Logging do _error do stream e is_running para debug
-  - Aguarda até 2s no fim para stream completar antes de stop()
+Mudanças relativamente a v2.0.1:
+  - PREBUFFER_MS reduzido de 500ms para 200ms para menor perda na 1a palavra.
+  - 9600 bytes de PCM em vez de 24000 antes do TalkbackStream arrancar.
+  - PyAV ainda consegue probe do WAV header com este buffer mais curto.
 
 
 Arquitectura:
@@ -143,7 +140,7 @@ async def _ensure_connected() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    log.info("Talkback v2.0.1 — WS+FIFO streaming (pre-buffer)")
+    log.info("Talkback v2.0.2 — WS+FIFO streaming (pre-buffer 200ms)")
     log.info("Modo: %s", "MOCK" if MOCK else "PRODUCAO")
     log.info("USER=%s API_KEY=%s CAMERA_ID=%s",
              USER, (API_KEY[:8]+"...") if API_KEY else "", CAMERA_ID)
@@ -185,7 +182,7 @@ async def health() -> JSONResponse:
 
     info = {
         "ok": MOCK or protect is not None,
-        "version": "2.0.1",
+        "version": "2.0.2",
         "mock": MOCK,
         "camera_id": CAMERA_ID or None,
         "connected": protect is not None,
@@ -271,9 +268,9 @@ async def _run_talkback_session(ws: WebSocket, camera) -> None:
     FIFO com só 44 bytes. Damos-lhe um pacote inicial substancial.
     """
     fifo_path = FIFO_PATH
-    PREBUFFER_MS = 500
+    PREBUFFER_MS = 200
     PREBUFFER_BYTES = (PCM_RATE * PCM_CHANNELS * PCM_BITS // 8) * PREBUFFER_MS // 1000
-    # 24000 * 1 * 2 * 0.5 = 24000 bytes
+    # 24000 * 1 * 2 * 0.2 = 9600 bytes
 
     # 1. Criar FIFO
     try:

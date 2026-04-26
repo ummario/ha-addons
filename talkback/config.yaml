@@ -1,5 +1,5 @@
 name: "Talkback Campainha"
-version: "2.0.1"
+version: "2.0.2"
 slug: "talkback"
 description: "Push-to-talk WS+PCM streaming para UniFi Protect G6 Pro Entry"
 url: "https://github.com/ummario/ha-addons"
