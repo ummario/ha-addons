@@ -1,5 +1,14 @@
 """
-Talkback Server v2.0.0 — WebSocket + FIFO streaming.
+Talkback Server v2.0.1 — WebSocket + FIFO streaming com pre-buffer.
+
+Mudanças relativamente a v2.0.0:
+  - Pre-buffering de 500ms antes de iniciar TalkbackStream (resolve probe
+    do PyAV em FIFO sem dados suficientes)
+  - Reorganização da ordem de operações: ready → recolher prebuffer →
+    create_talkback_stream → start → abrir writer → flush prebuffer
+  - Logging do _error do stream e is_running para debug
+  - Aguarda até 2s no fim para stream completar antes de stop()
+
 
 Arquitectura:
   Browser AudioWorklet  ──[WebSocket binário, PCM s16le 24kHz mono]──►  /ws
@@ -134,7 +143,7 @@ async def _ensure_connected() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    log.info("Talkback v2.0.0 — WS+FIFO streaming")
+    log.info("Talkback v2.0.1 — WS+FIFO streaming (pre-buffer)")
     log.info("Modo: %s", "MOCK" if MOCK else "PRODUCAO")
     log.info("USER=%s API_KEY=%s CAMERA_ID=%s",
              USER, (API_KEY[:8]+"...") if API_KEY else "", CAMERA_ID)
@@ -176,7 +185,7 @@ async def health() -> JSONResponse:
 
     info = {
         "ok": MOCK or protect is not None,
-        "version": "2.0.0",
+        "version": "2.0.1",
         "mock": MOCK,
         "camera_id": CAMERA_ID or None,
         "connected": protect is not None,
@@ -247,9 +256,24 @@ async def ws_talkback(ws: WebSocket) -> None:
 
 async def _run_talkback_session(ws: WebSocket, camera) -> None:
     """
-    Sessão talkback completa. Cria FIFO, abre TalkbackStream, recebe PCM do WS.
+    Sessão talkback completa. Estratégia:
+      1. Criar FIFO
+      2. Abrir FIFO writer (em thread, fica blocked até reader abrir)
+      3. Enviar 'ready' ao browser; receber PCM e PRE-BUFFERAR (~500ms)
+         enquanto o FIFO writer ainda não está aberto
+      4. Quando o pre-buffer encher, criar TalkbackStream + start()
+         (isto abre o reader do FIFO, libertando o writer)
+      5. Despejar pre-buffer todo no FIFO de uma vez
+      6. Continuar a receber PCM do WS e a escrever no FIFO
+      7. No fim, fechar writer (EOF), aguardar stream completar, stop()
+
+    O pre-buffer evita o problema de PyAV ficar a tentar fazer probe num
+    FIFO com só 44 bytes. Damos-lhe um pacote inicial substancial.
     """
     fifo_path = FIFO_PATH
+    PREBUFFER_MS = 500
+    PREBUFFER_BYTES = (PCM_RATE * PCM_CHANNELS * PCM_BITS // 8) * PREBUFFER_MS // 1000
+    # 24000 * 1 * 2 * 0.5 = 24000 bytes
 
     # 1. Criar FIFO
     try:
@@ -261,43 +285,64 @@ async def _run_talkback_session(ws: WebSocket, camera) -> None:
         await ws.close()
         return
 
-    # 2. Abrir FIFO para escrita em background.
-    #    O open() bloqueia até alguém abrir o outro lado para leitura.
-    #    Como TalkbackStream abre o fifo no _stream_audio_sync (thread),
-    #    fazemos o open num executor para não bloquear o event loop.
     loop = asyncio.get_running_loop()
     fifo_fd: Optional[int] = None
     stream = None
     bytes_written = 0
     t_start = time.monotonic()
+    prebuffer = bytearray(_make_wav_header())  # já começa com header
 
     try:
-        # 3. Iniciar TalkbackStream (que abre fifo do lado leitor)
+        # 2. Anunciar ready ao browser para começar a enviar PCM
+        await ws.send_json({"event": "ready", "rate": PCM_RATE,
+                             "bits": PCM_BITS, "channels": PCM_CHANNELS})
+        log.info("Pre-buffer alvo: %d bytes (%dms)", PREBUFFER_BYTES, PREBUFFER_MS)
+
+        # 3. Acumular pre-buffer
+        while len(prebuffer) - len(_make_wav_header()) < PREBUFFER_BYTES:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=3.0)
+            except asyncio.TimeoutError:
+                raise RuntimeError("timeout a acumular pre-buffer")
+            if msg["type"] == "websocket.disconnect":
+                log.info("WS disconnect durante pre-buffer")
+                return
+            data = msg.get("bytes")
+            if data:
+                prebuffer.extend(data)
+                bytes_written += len(data)
+
+        log.info("Pre-buffer pronto: %d bytes total", len(prebuffer))
+
+        # 4. Criar TalkbackStream e iniciar
         log.info("A criar talkback stream para %s (FIFO=%s)", camera.name, fifo_path)
         stream = await camera.create_talkback_stream(fifo_path)
-
-        # start() corre num thread; o thread chama av.open(fifo) em modo read,
-        # o que desbloqueia o nosso open de escrita (a seguir)
         await stream.start()
+        log.info("Stream iniciado, _error=%r is_running=%s",
+                 stream._error, stream.is_running)
 
-        # 4. Abrir FIFO para escrita (depois do stream começar, senão deadlock)
+        # 5. Abrir FIFO para escrita (agora que reader está aberto)
         def _open_fifo_write():
             return os.open(fifo_path, os.O_WRONLY)
 
         fifo_fd = await loop.run_in_executor(None, _open_fifo_write)
         log.info("FIFO writer aberto, fd=%d", fifo_fd)
 
-        # 5. Enviar header WAV
-        hdr = _make_wav_header()
-        await loop.run_in_executor(None, os.write, fifo_fd, hdr)
-        log.info("Header WAV escrito (%d bytes)", len(hdr))
+        # 6. Despejar pre-buffer
+        await loop.run_in_executor(None, os.write, fifo_fd, bytes(prebuffer))
+        log.info("Pre-buffer escrito no FIFO (%d bytes)", len(prebuffer))
 
-        await ws.send_json({"event": "ready", "rate": PCM_RATE, "bits": PCM_BITS,
-                             "channels": PCM_CHANNELS})
+        # Verificar logo se o stream já não morreu
+        if stream._error:
+            raise RuntimeError(f"stream error logo apos prebuffer: {stream._error}")
 
-        # 6. Loop principal: receber PCM do WS, escrever no FIFO
+        # 7. Loop principal: receber PCM do WS, escrever no FIFO
         last_log_t = time.monotonic()
         while True:
+            if not stream.is_running:
+                log.warning("Stream parou inesperadamente, _error=%r", stream._error)
+                break
+
             try:
                 msg = await ws.receive()
             except WebSocketDisconnect:
@@ -310,10 +355,6 @@ async def _run_talkback_session(ws: WebSocket, camera) -> None:
 
             data = msg.get("bytes")
             if data is None:
-                # Pode ser texto (controlo) — ignorar por agora
-                txt = msg.get("text", "")
-                if txt:
-                    log.debug("WS text: %s", txt[:80])
                 continue
 
             # Escrever PCM no FIFO
@@ -321,7 +362,7 @@ async def _run_talkback_session(ws: WebSocket, camera) -> None:
                 await loop.run_in_executor(None, os.write, fifo_fd, data)
                 bytes_written += len(data)
             except BrokenPipeError:
-                log.warning("FIFO broken pipe — stream parou?")
+                log.warning("FIFO broken pipe — stream parou? _error=%r", stream._error)
                 break
             except OSError as e:
                 log.error("FIFO write error: %s", e)
@@ -329,15 +370,14 @@ async def _run_talkback_session(ws: WebSocket, camera) -> None:
 
             # Log periódico de débito
             now = time.monotonic()
-            if now - last_log_t > 5.0:
+            if now - last_log_t > 2.0:
                 kbps = (bytes_written * 8 / 1000) / (now - t_start)
-                log.info("Throughput: %.1f kbps (%d bytes total)",
-                         kbps, bytes_written)
+                log.info("Throughput: %.1f kbps (%d bytes), stream.is_running=%s",
+                         kbps, bytes_written, stream.is_running)
                 last_log_t = now
 
-        # 7. Cleanup
-        log.info("Sessão terminou: %d bytes em %.1fs", bytes_written,
-                 time.monotonic() - t_start)
+        log.info("Sessão terminou: %d bytes em %.1fs",
+                 bytes_written, time.monotonic() - t_start)
 
     except Exception as e:
         log.exception("Erro na sessão talkback: %s", e)
@@ -355,11 +395,19 @@ async def _run_talkback_session(ws: WebSocket, camera) -> None:
             except OSError:
                 pass
 
-        # Parar stream
+        # Aguardar stream completar (até 2s) e capturar erro
         if stream is not None:
             try:
+                # Dar tempo ao thread interno de processar e flush
+                for _ in range(20):
+                    if not stream.is_running:
+                        break
+                    await asyncio.sleep(0.1)
                 await stream.stop()
-                log.info("TalkbackStream parado")
+                if stream._error:
+                    log.error("TalkbackStream final error: %s", stream._error)
+                else:
+                    log.info("TalkbackStream parado limpo")
             except Exception as e:
                 log.warning("erro a parar stream: %s", e)
 
