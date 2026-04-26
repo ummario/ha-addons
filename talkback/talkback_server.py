@@ -46,16 +46,23 @@ app.add_middleware(
 
 protect: ProtectApiClient | None = None
 _playback_lock = asyncio.Lock()
+_last_connect_error: str | None = None
 
 
 async def _ensure_connected() -> None:
-    global protect
+    global protect, _last_connect_error
     if MOCK or protect is not None:
         return
     log.info("A ligar ao NVR %s:%d como %s...", HOST, PORT, USER)
-    protect = ProtectApiClient(HOST, PORT, USER, PASS, api_key=API_KEY, verify_ssl=SSL_VERIFY)
-    await protect.update()
-    log.info("Ligado. Cameras: %d", len(protect.bootstrap.cameras))
+    try:
+        protect = ProtectApiClient(HOST, PORT, USER, PASS, api_key=API_KEY, verify_ssl=SSL_VERIFY)
+        await protect.update()
+        _last_connect_error = None
+        log.info("Ligado. Cameras: %d", len(protect.bootstrap.cameras))
+    except Exception as e:
+        protect = None
+        _last_connect_error = str(e)
+        raise
 
 
 async def _wake_speaker() -> None:
@@ -80,7 +87,11 @@ async def _wake_speaker() -> None:
 async def startup() -> None:
     log.info("Modo: %s", "MOCK" if MOCK else "PRODUCAO")
     log.info("USER=%s API_KEY=%s CAMERA_ID=%s", USER, API_KEY[:8]+"..." if API_KEY else "", CAMERA_ID)
-    if not MOCK and all([USER, PASS, API_KEY, CAMERA_ID]):
+    missing = [k for k, v in {"USER": USER, "PASS": PASS, "API_KEY": API_KEY, "CAMERA_ID": CAMERA_ID}.items() if not v]
+    if missing and not MOCK:
+        log.error("Vars em falta: %s. Preencher opcoes do add-on.", missing)
+        return
+    if not MOCK:
         try:
             await _ensure_connected()
         except Exception as e:
@@ -131,17 +142,30 @@ async def push(request: Request) -> JSONResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
+    # Tentar reconectar on-demand se nao estiver ligado
+    if not MOCK and protect is None:
+        try:
+            await _ensure_connected()
+        except Exception:
+            pass
+
     info = {
-        "ok": True,
+        "ok": MOCK or protect is not None,
         "mock": MOCK,
         "camera_id": CAMERA_ID or None,
         "connected": protect is not None,
     }
+    if _last_connect_error:
+        info["error"] = _last_connect_error
     if protect is not None and CAMERA_ID:
-        cam = protect.bootstrap.cameras.get(CAMERA_ID)
-        if cam:
-            info["camera_name"] = cam.name
-            info["has_speaker"] = cam.feature_flags.has_speaker
+        try:
+            await protect.update()
+            cam = protect.bootstrap.cameras.get(CAMERA_ID)
+            if cam:
+                info["camera_name"] = cam.name
+                info["has_speaker"] = cam.feature_flags.has_speaker
+        except Exception as e:
+            info["bootstrap_error"] = str(e)
     return JSONResponse(info)
 
 
