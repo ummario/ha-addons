@@ -1,189 +1,308 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Talkback — Campainha</title>
-  <style>
-    :root { color-scheme: dark; }
-    html, body {
-      margin: 0; padding: 0; height: 100%;
-      background: #111; color: #eee;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      touch-action: manipulation;
-      user-select: none; -webkit-user-select: none;
-    }
-    .stack {
-      min-height: 100%; display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      gap: 20px; padding: 32px; box-sizing: border-box;
-    }
-    h1 { font-size: 18px; font-weight: 400; opacity: 0.6; margin: 0; }
-    #btn {
-      width: 200px; height: 200px; border-radius: 50%;
-      border: 4px solid #333; background: #1a1a1a; color: #eee;
-      font-size: 16px; font-weight: 500; cursor: pointer;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 8px;
-      transition: all .2s ease;
-    }
-    #btn .icon { font-size: 48px; line-height: 1; }
-    #btn .label { font-size: 13px; opacity: 0.7; letter-spacing: 1px; text-transform: uppercase; }
-    #btn.active {
-      background: #1a3a1a; border-color: #2d7a2d;
-      box-shadow: 0 0 30px rgba(45,122,45,0.4);
-    }
-    #btn.sending { background: #1a2a3a; border-color: #2d5b7a; }
-    .pill {
-      padding: 4px 12px; border-radius: 999px; font-size: 12px;
-      border: 1px solid #333; background: #1a1a1a;
-    }
-    .pill.ok { border-color: #2d7a2d; background: #1a3a1a; }
-    .pill.err { border-color: #7a2d2d; background: #3a1a1a; }
-    #log {
-      width: 100%; max-width: 480px; background: #0a0a0a;
-      border: 1px solid #1a1a1a; border-radius: 8px;
-      padding: 10px; font-family: ui-monospace, monospace;
-      font-size: 11px; line-height: 1.6;
-      overflow-y: auto; max-height: 160px; color: #666;
-    }
-    .row { display: flex; gap: 8px; align-items: center; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Talkback Campainha</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+  background: #0c0d10; color: #eaeaea;
+  font: 16px/1.5 -apple-system, system-ui, sans-serif;
+  display: flex; flex-direction: column; align-items: center;
+  min-height: 100vh;
+}
+h1 { font-size: 22px; margin: 24px 0 8px; }
+.sub { color: #8c8f96; font-size: 14px; margin-bottom: 24px; }
+
+.btn {
+  appearance: none; border: none; cursor: pointer;
+  width: 200px; height: 200px; border-radius: 50%;
+  font-size: 18px; font-weight: 600; color: #fff;
+  background: #2563eb; transition: transform .1s, background .15s;
+  display: flex; align-items: center; justify-content: center;
+  margin: 16px 0; box-shadow: 0 8px 32px rgba(37,99,235,.25);
+}
+.btn:active { transform: scale(.97); }
+.btn[data-state="recording"] { background: #dc2626; animation: pulse 1.4s infinite; }
+.btn[data-state="connecting"] { background: #6b7280; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,.55); }
+  50%      { box-shadow: 0 0 0 24px rgba(220,38,38,0); }
+}
+
+.status {
+  margin: 16px 0; padding: 10px 16px; border-radius: 8px;
+  background: #1a1c22; font-size: 13px; min-height: 38px;
+  display: flex; align-items: center; justify-content: center; min-width: 240px;
+  text-align: center;
+}
+.status.error { background: #3a1a1a; color: #fca5a5; }
+.status.ok    { background: #14271c; color: #86efac; }
+
+.diag {
+  margin-top: 24px; padding: 12px 16px; border-radius: 8px;
+  background: #14161b; font: 11px/1.5 ui-monospace, monospace; color: #a8a8ad;
+  white-space: pre-wrap; word-break: break-all; max-width: 480px; width: 100%;
+  max-height: 220px; overflow-y: auto;
+}
+.diag b { color: #fff; }
+
+footer { margin: 32px 0 8px; font-size: 12px; color: #555; }
+</style>
 </head>
 <body>
-<div class="stack">
-  <h1>Campainha Entrada</h1>
-  <button id="btn" onclick="toggleTalk()">
-    <span class="icon">🎤</span>
-    <span class="label" id="btn-label">Falar</span>
-  </button>
-  <div class="row">
-    <span class="pill" id="status-pill">pronto</span>
-    <span class="pill" id="health-pill">a ligar...</span>
-  </div>
-  <div id="log"></div>
-</div>
+
+<h1>Campainha</h1>
+<div class="sub">Push-to-talk · v2.0.0 (WS+PCM)</div>
+
+<button id="btn" class="btn" data-state="idle">🎤 Falar</button>
+
+<div id="status" class="status">Pronto</div>
+
+<details style="margin-top:24px;width:100%;max-width:480px;">
+  <summary style="cursor:pointer;font-size:12px;color:#666;">Diagnóstico</summary>
+  <div id="diag" class="diag"></div>
+</details>
+
+<footer>UniFi Protect G6 · Talkback HA Add-on</footer>
 
 <script>
-const btn = document.getElementById('btn');
-const btnLabel = document.getElementById('btn-label');
-const statusPill = document.getElementById('status-pill');
-const healthPill = document.getElementById('health-pill');
-const logEl = document.getElementById('log');
+// ------- AudioWorklet inline (downsample 48k→24k + s16le) -------
+const WORKLET_CODE = `
+class PCM24Worklet extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    // Buffer de acumulação a 48kHz para downsample x2
+    this._inBuf = new Float32Array(0);
+    // Frame size de saída em samples a 24kHz: ~20ms = 480 samples
+    this._outFrameSamples = 480;
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || input.length === 0) return true;
+    const ch0 = input[0]; // mono
+    if (!ch0 || ch0.length === 0) return true;
 
-let isActive = false;
-let stream = null;
-let chunkInterval = null;
-let mediaRecorder = null;
-let currentChunks = [];
+    // Concatenar com buffer existente
+    const combined = new Float32Array(this._inBuf.length + ch0.length);
+    combined.set(this._inBuf, 0);
+    combined.set(ch0, this._inBuf.length);
 
-// Detectar base path (funciona tanto em ingress do HA como standalone)
-const BASE = (() => {
-  const p = window.location.pathname;
-  // Se estiver em ingress, o path é /api/hassio_ingress/xxxx/
-  const m = p.match(/^(\/api\/hassio_ingress\/[^/]+)/);
-  return m ? m[1] : '';
-})();
-
-function addLog(msg, color) {
-  const t = new Date().toLocaleTimeString('pt-PT');
-  const line = document.createElement('div');
-  line.textContent = `${t}  ${msg}`;
-  if (color) line.style.color = color;
-  logEl.prepend(line);
-  if (logEl.children.length > 20) logEl.removeChild(logEl.lastChild);
-}
-
-async function refreshHealth() {
-  try {
-    const r = await fetch(`${BASE}/health`);
-    const h = await r.json();
-    healthPill.className = 'pill ' + (h.connected ? 'ok' : (h.mock ? '' : 'err'));
-    healthPill.textContent = h.mock
-      ? 'MOCK'
-      : (h.connected ? '● ' + (h.camera_name || 'ligado') : '○ desligado');
-  } catch {
-    healthPill.className = 'pill err';
-    healthPill.textContent = '○ offline';
+    // Downsample 48k→24k: média de pares
+    const outLen = Math.floor(combined.length / 2);
+    if (outLen >= this._outFrameSamples) {
+      // Quantos frames cabem
+      const totalOutSamples = Math.floor(outLen / this._outFrameSamples) * this._outFrameSamples;
+      const out = new Int16Array(totalOutSamples);
+      for (let i = 0; i < totalOutSamples; i++) {
+        const a = combined[i * 2];
+        const b = combined[i * 2 + 1];
+        const avg = (a + b) * 0.5;
+        // Float [-1,1] → int16
+        const clamped = Math.max(-1, Math.min(1, avg));
+        out[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
+      }
+      // Resto do buffer (samples 48k não consumidos)
+      const consumedIn = totalOutSamples * 2;
+      this._inBuf = combined.slice(consumedIn);
+      this.port.postMessage(out.buffer, [out.buffer]);
+    } else {
+      this._inBuf = combined;
+    }
+    return true;
   }
 }
-refreshHealth();
-setInterval(refreshHealth, 15000);
+registerProcessor('pcm24', PCM24Worklet);
+`;
 
-async function toggleTalk() {
-  if (!isActive) await startTalking();
-  else stopTalking();
+const $btn = document.getElementById('btn');
+const $status = document.getElementById('status');
+const $diag = document.getElementById('diag');
+
+let state = 'idle'; // idle | connecting | recording
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let workletNode = null;
+let micSource = null;
+let bytesSent = 0;
+
+function setStatus(text, kind = '') {
+  $status.textContent = text;
+  $status.className = 'status' + (kind ? ' ' + kind : '');
 }
 
-async function startTalking() {
+function diagLog(line) {
+  const t = new Date().toLocaleTimeString();
+  $diag.textContent += `[${t}] ${line}\n`;
+  $diag.scrollTop = $diag.scrollHeight;
+}
+
+function setBtn(s) {
+  state = s;
+  $btn.dataset.state = s;
+  if (s === 'idle')        $btn.textContent = '🎤 Falar';
+  else if (s === 'connecting') $btn.textContent = '⏳ A ligar...';
+  else if (s === 'recording')  $btn.textContent = '🔴 A falar...';
+}
+
+async function start() {
+  if (state !== 'idle') return;
+  setBtn('connecting');
+  setStatus('A ligar...', '');
+  diagLog('start()');
+
+  // 1. Pedir mic
   try {
-    if (!stream) {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 }
-      });
-      addLog('microfone ligado', '#4a4');
-    }
-  } catch(e) {
-    addLog('ERRO mic: ' + e.message, '#a44');
-    statusPill.textContent = 'erro mic';
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+      video: false,
+    });
+    diagLog('mic OK');
+  } catch (e) {
+    diagLog('mic ERROR: ' + e.message);
+    setStatus('Sem permissão de microfone', 'error');
+    setBtn('idle');
     return;
   }
-  isActive = true;
-  btn.classList.add('active');
-  btnLabel.textContent = 'A falar';
-  statusPill.textContent = 'a gravar...';
-  addLog('talkback LIGADO', '#4a4');
-  sendChunk();
-  chunkInterval = setInterval(sendChunk, 3000);
-}
 
-function stopTalking() {
-  isActive = false;
-  clearInterval(chunkInterval);
-  chunkInterval = null;
-  if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
-  btn.classList.remove('active', 'sending');
-  btnLabel.textContent = 'Falar';
-  statusPill.textContent = 'pronto';
-  addLog('talkback DESLIGADO', '#666');
-}
+  // 2. AudioContext + Worklet
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
+    diagLog('AudioContext ' + audioCtx.sampleRate + 'Hz');
 
-function sendChunk() {
-  if (!isActive || !stream) return;
-  const mime = ['audio/webm;codecs=opus','audio/webm','audio/mp4','']
-    .find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
-  currentChunks = [];
-  const mr = mime
-    ? new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 64000 })
-    : new MediaRecorder(stream);
-  mr.ondataavailable = e => { if (e.data.size > 0) currentChunks.push(e.data); };
-  mr.onstop = async () => {
-    if (!currentChunks.length) return;
-    const blob = new Blob(currentChunks, { type: mr.mimeType || 'audio/webm' });
-    if (blob.size < 500) return;
-    try {
-      btn.classList.add('sending');
-      const r = await fetch(`${BASE}/push`, {
-        method: 'POST',
-        headers: { 'Content-Type': blob.type },
-        body: blob,
-      });
-      btn.classList.remove('sending');
-      if (r.ok) {
-        addLog('chunk ok (' + (blob.size/1024).toFixed(1) + ' KB)', '#4a4');
-        if (isActive) statusPill.textContent = 'a gravar...';
-      } else {
-        addLog('ERRO ' + r.status, '#a44');
-      }
-    } catch(e) {
-      btn.classList.remove('sending');
-      addLog('ERRO: ' + e.message, '#a44');
+    const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    await audioCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+
+    workletNode = new AudioWorkletNode(audioCtx, 'pcm24');
+    micSource = audioCtx.createMediaStreamSource(micStream);
+    micSource.connect(workletNode);
+    // não ligamos ao destination — não queremos eco local
+    diagLog('worklet OK');
+  } catch (e) {
+    diagLog('audio setup ERROR: ' + e.message);
+    setStatus('Erro audio: ' + e.message, 'error');
+    cleanup();
+    setBtn('idle');
+    return;
+  }
+
+  // 3. WebSocket
+  const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:')
+    + '//' + location.host + (location.pathname.replace(/\/$/, '')) + '/ws';
+  diagLog('WS connect: ' + wsUrl);
+
+  try {
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+  } catch (e) {
+    diagLog('WS ERROR: ' + e.message);
+    setStatus('Erro WS', 'error');
+    cleanup();
+    setBtn('idle');
+    return;
+  }
+
+  ws.onopen = () => {
+    diagLog('WS open');
+  };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') return;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    diagLog('WS msg: ' + JSON.stringify(msg));
+    if (msg.event === 'ready') {
+      // Servidor pronto — começar a enviar PCM
+      bytesSent = 0;
+      workletNode.port.onmessage = (e) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(e.data);
+          bytesSent += e.data.byteLength;
+        }
+      };
+      setBtn('recording');
+      setStatus('A falar — clique para parar', 'ok');
+    } else if (msg.event === 'error') {
+      setStatus('Erro: ' + msg.msg, 'error');
+      stop();
     }
   };
-  mediaRecorder = mr;
-  mr.start();
-  setTimeout(() => { if (mr.state === 'recording') mr.stop(); }, 2800);
+
+  ws.onerror = (e) => {
+    diagLog('WS error');
+  };
+
+  ws.onclose = (ev) => {
+    diagLog('WS close code=' + ev.code + ' reason=' + (ev.reason || '-'));
+    if (state === 'recording') {
+      setStatus('Ligação fechada', '');
+    }
+    cleanup();
+    setBtn('idle');
+  };
 }
+
+function stop() {
+  if (state === 'idle') return;
+  diagLog('stop() — bytes enviados: ' + bytesSent);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close(1000, 'user stop');
+  }
+  cleanup();
+  setBtn('idle');
+  setStatus('Parou', '');
+}
+
+function cleanup() {
+  if (workletNode) {
+    try { workletNode.port.onmessage = null; } catch {}
+    try { workletNode.disconnect(); } catch {}
+    workletNode = null;
+  }
+  if (micSource) {
+    try { micSource.disconnect(); } catch {}
+    micSource = null;
+  }
+  if (audioCtx) {
+    try { audioCtx.close(); } catch {}
+    audioCtx = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  if (ws) {
+    try { ws.close(); } catch {}
+    ws = null;
+  }
+}
+
+$btn.addEventListener('click', () => {
+  if (state === 'idle') start();
+  else stop();
+});
+
+// Diagnóstico inicial
+diagLog('protocol=' + location.protocol);
+diagLog('isSecureContext=' + window.isSecureContext);
+diagLog('mediaDevices=' + (navigator.mediaDevices ? 'yes' : 'NO'));
+diagLog('UA=' + navigator.userAgent.slice(0, 80));
 </script>
+
 </body>
 </html>

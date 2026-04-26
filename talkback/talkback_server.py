@@ -1,12 +1,48 @@
 """
-Talkback Server — HA Add-on version
-Suporta ingress do Home Assistant.
+Talkback Server v2.0.0 — WebSocket + FIFO streaming.
+
+Arquitectura:
+  Browser AudioWorklet  ──[WebSocket binário, PCM s16le 24kHz mono]──►  /ws
+                                                                          │
+                                                                          ▼
+                                                              ┌─────────────────────┐
+                                                              │ Escreve PCM no FIFO │
+                                                              │ /tmp/talkback.fifo  │
+                                                              └──────────┬──────────┘
+                                                                         │
+                                                                         ▼
+                                                              ┌─────────────────────┐
+                                                              │ TalkbackStream lê   │
+                                                              │ FIFO via PyAV,      │
+                                                              │ encoda OPUS RTP,    │
+                                                              │ UDP pacing → câmara │
+                                                              └─────────────────────┘
+
+Endpoints:
+  GET  /            — serve talk.html
+  GET  /health      — diagnóstico
+  WS   /ws          — recebe PCM binário do browser, alimenta o stream
+
+Notas:
+  - PCM esperado: 16-bit signed little-endian, 24000 Hz, mono.
+  - Frame size do AudioWorklet (browser): 128 samples = ~5.3ms a 24kHz.
+  - O AudioWorklet faz o downsample de 48k→24k antes de enviar.
+  - A sessão UniFi (create_talkback_session_public) abre uma vez por WS,
+    fecha quando o WS fecha.
 """
 from __future__ import annotations
-import asyncio, json, logging, os, time, uuid
+
+import asyncio
+import json
+import logging
+import os
+import struct
+import time
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from uiprotect import ProtectApiClient
 
@@ -33,8 +69,12 @@ CAMERA_ID  = os.environ.get("UFP_CAMERA_ID", "")
 LISTEN_PORT = int(os.environ.get("TALKBACK_PORT", "3006"))
 MOCK       = os.environ.get("TALKBACK_MOCK", "0") == "1"
 
-CHUNK_DIR = Path("/tmp/talkback-chunks")
-CHUNK_DIR.mkdir(exist_ok=True)
+# PCM input format (do browser)
+PCM_RATE = 24000
+PCM_BITS = 16
+PCM_CHANNELS = 1
+
+FIFO_PATH = "/tmp/talkback.fifo"
 
 app = FastAPI()
 app.add_middleware(
@@ -44,9 +84,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-protect: ProtectApiClient | None = None
-_playback_lock = asyncio.Lock()
-_last_connect_error: str | None = None
+protect: Optional[ProtectApiClient] = None
+_last_connect_error: Optional[str] = None
+_session_lock = asyncio.Lock()  # impede 2 sessões talkback em simultâneo
+
+
+def _make_wav_header(sample_rate: int = PCM_RATE,
+                     bits_per_sample: int = PCM_BITS,
+                     channels: int = PCM_CHANNELS) -> bytes:
+    """
+    Header WAV de 44 bytes para tamanho 'infinito' (0xFFFFFFFF).
+    PyAV ignora o size field quando lê de FIFO/stream, mas o header
+    é necessário para identificar formato.
+    """
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    return (
+        b"RIFF"
+        + struct.pack("<I", 0xFFFFFFFF)  # size placeholder
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", 16)            # fmt chunk size
+        + struct.pack("<H", 1)             # PCM format
+        + struct.pack("<H", channels)
+        + struct.pack("<I", sample_rate)
+        + struct.pack("<I", byte_rate)
+        + struct.pack("<H", block_align)
+        + struct.pack("<H", bits_per_sample)
+        + b"data"
+        + struct.pack("<I", 0xFFFFFFFF)    # data size placeholder
+    )
 
 
 async def _ensure_connected() -> None:
@@ -65,29 +132,22 @@ async def _ensure_connected() -> None:
         raise
 
 
-async def _wake_speaker() -> None:
-    if MOCK or protect is None:
-        return
-    room_id = f"PR-{uuid.uuid4()}"
-    try:
-        async with protect._session.post(
-            f"https://{HOST}:{PORT}/proxy/access/api/v2/device/{CAMERA_ID}/remote_call",
-            json={"device_id": CAMERA_ID, "agora_channel": room_id,
-                  "mode": "webrtc", "room_id": room_id, "source": "web"},
-            headers={"X-API-KEY": API_KEY},
-            ssl=SSL_VERIFY,
-        ) as resp:
-            data = await resp.json()
-            log.info("wake_speaker: %s", data.get("codeS", "?"))
-    except Exception as e:
-        log.warning("wake_speaker falhou: %s", e)
-
-
 @app.on_event("startup")
 async def startup() -> None:
+    log.info("Talkback v2.0.0 — WS+FIFO streaming")
     log.info("Modo: %s", "MOCK" if MOCK else "PRODUCAO")
-    log.info("USER=%s API_KEY=%s CAMERA_ID=%s", USER, API_KEY[:8]+"..." if API_KEY else "", CAMERA_ID)
-    missing = [k for k, v in {"USER": USER, "PASS": PASS, "API_KEY": API_KEY, "CAMERA_ID": CAMERA_ID}.items() if not v]
+    log.info("USER=%s API_KEY=%s CAMERA_ID=%s",
+             USER, (API_KEY[:8]+"...") if API_KEY else "", CAMERA_ID)
+
+    # Limpar FIFO se existir
+    try:
+        if os.path.exists(FIFO_PATH):
+            os.unlink(FIFO_PATH)
+    except OSError as e:
+        log.warning("nao limpou FIFO: %s", e)
+
+    missing = [k for k, v in {"USER": USER, "PASS": PASS, "API_KEY": API_KEY,
+                              "CAMERA_ID": CAMERA_ID}.items() if not v]
     if missing and not MOCK:
         log.error("Vars em falta: %s. Preencher opcoes do add-on.", missing)
         return
@@ -106,43 +166,8 @@ async def index() -> FileResponse:
     return FileResponse(html_path)
 
 
-@app.post("/push")
-async def push(request: Request) -> JSONResponse:
-    body = await request.body()
-    if not body:
-        raise HTTPException(400, "body vazio")
-    chunk_id = uuid.uuid4().hex[:8]
-    chunk_path = CHUNK_DIR / f"chunk_{chunk_id}.webm"
-    chunk_path.write_bytes(body)
-    log.info("Chunk %s (%.1f KB)", chunk_id, len(body) / 1024)
-    if MOCK:
-        chunk_path.unlink(missing_ok=True)
-        return JSONResponse({"ok": True, "mock": True})
-    try:
-        await _ensure_connected()
-        assert protect is not None
-        camera = protect.bootstrap.cameras.get(CAMERA_ID)
-        if camera is None:
-            raise HTTPException(404, f"camera {CAMERA_ID} nao encontrada")
-        async with _playback_lock:
-            t0 = time.monotonic()
-            await _wake_speaker()
-            await asyncio.sleep(0.8)
-            await camera.play_audio(str(chunk_path), blocking=True)
-            log.info("Chunk %s em %.2fs", chunk_id, time.monotonic() - t0)
-        return JSONResponse({"ok": True, "bytes": len(body)})
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.exception("Falha: %s", e)
-        raise HTTPException(500, str(e))
-    finally:
-        chunk_path.unlink(missing_ok=True)
-
-
 @app.get("/health")
 async def health() -> JSONResponse:
-    # Tentar reconectar on-demand se nao estiver ligado
     if not MOCK and protect is None:
         try:
             await _ensure_connected()
@@ -151,9 +176,11 @@ async def health() -> JSONResponse:
 
     info = {
         "ok": MOCK or protect is not None,
+        "version": "2.0.0",
         "mock": MOCK,
         "camera_id": CAMERA_ID or None,
         "connected": protect is not None,
+        "transport": "websocket+fifo",
     }
     if _last_connect_error:
         info["error"] = _last_connect_error
@@ -167,6 +194,187 @@ async def health() -> JSONResponse:
         except Exception as e:
             info["bootstrap_error"] = str(e)
     return JSONResponse(info)
+
+
+@app.websocket("/ws")
+async def ws_talkback(ws: WebSocket) -> None:
+    """
+    Recebe PCM binário do browser, escreve no FIFO, mantém TalkbackStream a ler.
+
+    Protocolo:
+      Cliente envia frames PCM s16le 24kHz mono em mensagens binárias.
+      Servidor envia mensagens JSON de status: {"event": "...", ...}.
+    """
+    await ws.accept()
+    log.info("WS aberto: %s", ws.client)
+
+    if MOCK:
+        await ws.send_json({"event": "ready", "mock": True})
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+        except WebSocketDisconnect:
+            pass
+        log.info("WS fechado (mock)")
+        return
+
+    # Verificar conexão NVR
+    try:
+        await _ensure_connected()
+    except Exception as e:
+        await ws.send_json({"event": "error", "msg": f"NVR connect failed: {e}"})
+        await ws.close()
+        return
+
+    assert protect is not None
+    camera = protect.bootstrap.cameras.get(CAMERA_ID)
+    if camera is None:
+        await ws.send_json({"event": "error", "msg": f"camera {CAMERA_ID} nao encontrada"})
+        await ws.close()
+        return
+
+    # Lock global: só 1 sessão talkback em simultâneo
+    if _session_lock.locked():
+        await ws.send_json({"event": "error", "msg": "outra sessao talkback activa"})
+        await ws.close()
+        return
+
+    async with _session_lock:
+        await _run_talkback_session(ws, camera)
+
+
+async def _run_talkback_session(ws: WebSocket, camera) -> None:
+    """
+    Sessão talkback completa. Cria FIFO, abre TalkbackStream, recebe PCM do WS.
+    """
+    fifo_path = FIFO_PATH
+
+    # 1. Criar FIFO
+    try:
+        if os.path.exists(fifo_path):
+            os.unlink(fifo_path)
+        os.mkfifo(fifo_path)
+    except OSError as e:
+        await ws.send_json({"event": "error", "msg": f"mkfifo: {e}"})
+        await ws.close()
+        return
+
+    # 2. Abrir FIFO para escrita em background.
+    #    O open() bloqueia até alguém abrir o outro lado para leitura.
+    #    Como TalkbackStream abre o fifo no _stream_audio_sync (thread),
+    #    fazemos o open num executor para não bloquear o event loop.
+    loop = asyncio.get_running_loop()
+    fifo_fd: Optional[int] = None
+    stream = None
+    bytes_written = 0
+    t_start = time.monotonic()
+
+    try:
+        # 3. Iniciar TalkbackStream (que abre fifo do lado leitor)
+        log.info("A criar talkback stream para %s (FIFO=%s)", camera.name, fifo_path)
+        stream = await camera.create_talkback_stream(fifo_path)
+
+        # start() corre num thread; o thread chama av.open(fifo) em modo read,
+        # o que desbloqueia o nosso open de escrita (a seguir)
+        await stream.start()
+
+        # 4. Abrir FIFO para escrita (depois do stream começar, senão deadlock)
+        def _open_fifo_write():
+            return os.open(fifo_path, os.O_WRONLY)
+
+        fifo_fd = await loop.run_in_executor(None, _open_fifo_write)
+        log.info("FIFO writer aberto, fd=%d", fifo_fd)
+
+        # 5. Enviar header WAV
+        hdr = _make_wav_header()
+        await loop.run_in_executor(None, os.write, fifo_fd, hdr)
+        log.info("Header WAV escrito (%d bytes)", len(hdr))
+
+        await ws.send_json({"event": "ready", "rate": PCM_RATE, "bits": PCM_BITS,
+                             "channels": PCM_CHANNELS})
+
+        # 6. Loop principal: receber PCM do WS, escrever no FIFO
+        last_log_t = time.monotonic()
+        while True:
+            try:
+                msg = await ws.receive()
+            except WebSocketDisconnect:
+                log.info("WS desconectou (cliente)")
+                break
+
+            if msg["type"] == "websocket.disconnect":
+                log.info("WS disconnect message")
+                break
+
+            data = msg.get("bytes")
+            if data is None:
+                # Pode ser texto (controlo) — ignorar por agora
+                txt = msg.get("text", "")
+                if txt:
+                    log.debug("WS text: %s", txt[:80])
+                continue
+
+            # Escrever PCM no FIFO
+            try:
+                await loop.run_in_executor(None, os.write, fifo_fd, data)
+                bytes_written += len(data)
+            except BrokenPipeError:
+                log.warning("FIFO broken pipe — stream parou?")
+                break
+            except OSError as e:
+                log.error("FIFO write error: %s", e)
+                break
+
+            # Log periódico de débito
+            now = time.monotonic()
+            if now - last_log_t > 5.0:
+                kbps = (bytes_written * 8 / 1000) / (now - t_start)
+                log.info("Throughput: %.1f kbps (%d bytes total)",
+                         kbps, bytes_written)
+                last_log_t = now
+
+        # 7. Cleanup
+        log.info("Sessão terminou: %d bytes em %.1fs", bytes_written,
+                 time.monotonic() - t_start)
+
+    except Exception as e:
+        log.exception("Erro na sessão talkback: %s", e)
+        try:
+            await ws.send_json({"event": "error", "msg": str(e)})
+        except Exception:
+            pass
+
+    finally:
+        # Fechar FIFO writer (sinaliza EOF ao stream)
+        if fifo_fd is not None:
+            try:
+                os.close(fifo_fd)
+                log.info("FIFO writer fechado")
+            except OSError:
+                pass
+
+        # Parar stream
+        if stream is not None:
+            try:
+                await stream.stop()
+                log.info("TalkbackStream parado")
+            except Exception as e:
+                log.warning("erro a parar stream: %s", e)
+
+        # Apagar FIFO
+        try:
+            if os.path.exists(fifo_path):
+                os.unlink(fifo_path)
+        except OSError:
+            pass
+
+        try:
+            if ws.client_state.name != "DISCONNECTED":
+                await ws.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

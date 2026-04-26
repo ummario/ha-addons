@@ -1,7 +1,7 @@
 name: "Talkback Campainha"
-version: "2.0.0"
+version: "1.0.5"
 slug: "talkback"
-description: "Push-to-talk WS+PCM streaming para UniFi Protect G6 Pro Entry"
+description: "Push-to-talk para UniFi Protect G6 Pro Entry"
 url: "https://github.com/ummario/ha-addons"
 arch:
   - aarch64
@@ -14,7 +14,7 @@ panel_title: "Campainha"
 ports:
   3006/tcp: 3006
 ports_description:
-  3006/tcp: "API talkback (HTTP+WS)"
+  3006/tcp: "API talkback (HTTP)"
 options:
   ufp_address: "10.20.30.100"
   ufp_port: 443
