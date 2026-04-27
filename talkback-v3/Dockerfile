@@ -8,8 +8,6 @@ RUN apk add --no-cache \
         uiprotect==10.3.1 \
         fastapi==0.115.6 \
         "uvicorn[standard]==0.32.0" \
-        aiohttp==3.10.10 \
-        av==13.1.0 \
     && apk del pkgconfig gcc musl-dev python3-dev ffmpeg-dev \
     && rm -rf /root/.cache /tmp/*
 
