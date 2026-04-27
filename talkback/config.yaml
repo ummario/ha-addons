@@ -13,8 +13,10 @@ panel_icon: "mdi:microphone"
 panel_title: "Campainha"
 ports:
   3006/tcp: 3006
+  3007/tcp: 3007
 ports_description:
   3006/tcp: "API talkback (HTTP+WS)"
+  3007/tcp: "Talkback v3 (NVR-direct, experimental)"
 options:
   ufp_address: "10.20.30.100"
   ufp_port: 443
